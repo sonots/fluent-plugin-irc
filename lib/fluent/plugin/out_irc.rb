@@ -1,5 +1,5 @@
 module Fluent
-  class IRCOutput < Fluent::Output
+  class IRCOutput < Fluent::BufferedOutput
     Fluent::Plugin.register_output('irc', self)
 
     include SetTimeKeyMixin
@@ -30,9 +30,7 @@ module Fluent
       val.split(',')
     end
 
-    config_param :blocking_timeout, :time,    :default => 0.5
-    config_param :send_queue_limit, :integer, :default => 100
-    config_param :send_interval,    :time,    :default => 2
+    config_param :blocking_timeout, :time, :default => 0.5
 
     COMMAND_MAP = {
       'priv_msg' => :priv_msg,
@@ -81,8 +79,6 @@ module Fluent
           raise Fluent::ConfigError, "command must be one of #{COMMAND_MAP.keys.join(', ')}"
         end
       end
-
-      @send_queue = []
     end
 
     def start
@@ -91,8 +87,6 @@ module Fluent
       begin
         @loop = Coolio::Loop.new
         @conn = create_connection
-        @timer = TimerWatcher.new(@send_interval, true, log, &method(:on_timer))
-        @loop.attach(@timer)
         @thread = Thread.new(&method(:run))
       rescue => e
         puts e
@@ -115,32 +109,24 @@ module Fluent
       log.error_backtrace
     end
 
-    def emit(tag, es, chain)
-      chain.next
+    def format(tag, time, record)
+      [tag, time, record].to_msgpack
+    end
 
+    def write(chunk)
       if @conn.closed?
         log.warn "out_irc: connection is closed. try to reconnect"
         @conn = create_connection
       end
 
-      es.each do |time,record|
-        if @send_queue.size >= @send_queue_limit
-          log.warn "out_irc: send queue size exceeded send_queue_limit(#{@send_queue_limit}), discards"
-          break
-        end
-
+      chunk.msgpack_each do |tag, time, record|
         filter_record(tag, time, record)
-        command, channel, message = build_command(record), build_channel(record), build_message(record)
-        log.debug { "out_irc: push {command:\"#{command}\", channel:\"#{channel}\", message:\"#{message}\"}" }
-        @send_queue.push([command, channel, message])
+        command = build_command(record)
+        channel = build_channel(record)
+        message = build_message(record)
+        log.info { "out_irc: send {command:\"#{command}\", channel:\"#{channel}\", message:\"#{message}\"}" }
+        @conn.send_message(command, channel, message)
       end
-    end
-
-    def on_timer
-      return if @send_queue.empty?
-      command, channel, message = @send_queue.shift
-      log.info { "out_irc: send {command:\"#{command}\", channel:\"#{channel}\", message:\"#{message}\"}" }
-      @conn.send_message(command, channel, message)
     end
 
     private
@@ -186,21 +172,6 @@ module Fluent
           log.warn "out_irc: the specified key '#{key}' not found in record. [#{record}]"
           ''
         end
-      end
-    end
-
-    class TimerWatcher < Coolio::TimerWatcher
-      def initialize(interval, repeat, log, &callback)
-        @callback = callback
-        @log = log
-        super(interval, repeat)
-      end
-
-      def on_timer
-        @callback.call
-      rescue
-        @log.error $!.to_s
-        @log.error_backtrace
       end
     end
 

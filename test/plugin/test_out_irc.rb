@@ -39,8 +39,8 @@ class IRCOutputTest < Test::Unit::TestCase
       time_key time
       time_format #{TIME_FORMAT}
       tag_key tag
-      send_queue_limit 10
-      send_interval 0.5
+      buffer_queue_limit 10
+      flush_interval 0.5
     ]
     config += %[command_keys #{command_keys}] if command_keys
     config
